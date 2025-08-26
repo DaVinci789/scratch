@@ -25,7 +25,7 @@ int toint(char *str, int len)
 int split(char *path, int tiles_x, int tiles_y)
 {
     Image src = LoadImage(path);
-    if (src.data == NULL) return;
+    if (src.data == NULL) return 0;
 
     int piece_width = src.width / tiles_x;
     int piece_height = src.height / tiles_y;
