@@ -31,6 +31,14 @@
 #define DLLPushBack_NPZ(nil,f,l,n,next,prev) DLLInsert_NPZ(nil,f,l,l,n,next,prev)
 #define DLLPushBack(f,l,n) DLLPushBack_NPZ(0,f,l,n,next,prev)
 
+//- rjf: singly-linked, singly-headed lists (stacks)
+#define SLLStackPush_N(f,n,next) ((n)->next=(f), (f)=(n))
+#define SLLStackPop_N(f,next) ((f)=(f)->next)
+
+//- rjf: singly-linked, singly-headed list helpers
+#define SLLStackPush(f,n) SLLStackPush_N(f,n,next)
+#define SLLStackPop(f) SLLStackPop_N(f,next)
+
 //------------------------------
 // Axis
 //------------------------------
@@ -56,7 +64,6 @@ typedef struct UI_Box UI_Box;
 struct UI_Box
 {
     char *name;
-    uint64_t key;
 
     UI_Box *first;
     UI_Box *last;
@@ -164,14 +171,43 @@ static void UI_ArrangeBox(UI_Box *box, float abs_x, float abs_y)
 }
 
 
-void UI_LayoutBox(UI_Box *box, int off_x, int off_y)
+void UI_LayoutBox(UI_Box *box, float off_x, float off_y)
 {
     // Pass 1: bottom-up size calculation
     UI_CalcSize(box);
 
     // Pass 2: top-down arrangement
-    UI_ArrangeBox(box, (float)off_x, (float)off_y);
+    UI_ArrangeBox(box, off_x, off_y);
 }
+
+typedef struct
+{
+    UI_Box *current_parent;
+    UI_Box *parent_stack[64];
+    ptrdiff_t parent_stack_top;
+} UI_State;
+
+void ui_push_parent(UI_State *ctx, UI_Box *box)
+{
+    ctx->parent_stack[ctx->parent_stack_top] = box;
+    ctx->parent_stack_top += 1;
+    ctx->current_parent = box;
+}
+
+void ui_pop_parent(UI_State *ctx)
+{
+    ctx->parent_stack_top -= 1;
+    ctx->current_parent = ctx->parent_stack[ctx->parent_stack_top];
+}
+
+void ui_box_make(UI_State *ctx, UI_Box *box)
+{
+    box->parent = ctx->current_parent;
+    DLLPushBack(ctx->current_parent->first, ctx->current_parent->last, box);
+}
+
+#define DeferLoop(begin, end) for(int _i_ = ((begin), 0); _i_ == 0; (_i_ += 1), (end))
+#define UI_Parent(ctx, n) DeferLoop(ui_push_parent(ctx, n), ui_pop_parent(ctx))
 
 
 //------------------------------
@@ -179,56 +215,39 @@ void UI_LayoutBox(UI_Box *box, int off_x, int off_y)
 //------------------------------
 int main(void)
 {
+    UI_State ctx = {0};
     UI_Box root = {
         .name = "root",
         .rect = {10, 10, 300, 300},
         .child_layout_axis = Axis2_Y,
     };
-
-    UI_Box child1 = {
+    UI_Box child1 = (UI_Box) {
         .name = "child1",
         .rect = {.width = 50, .height = 50},
         .child_layout_axis = Axis2_X,
         .flags = UI_BoxFlags_FitChildren | UI_BoxFlags_MinimumSize,
     };
-    UI_Box child2 = {
+    UI_Box child2 = (UI_Box) {
         .name = "child2",
         .rect = {.width = 50, .height = 50},
         .child_layout_axis = Axis2_X,
         .flags = UI_BoxFlags_FitChildren | UI_BoxFlags_MinimumSize,
     };
-    UI_Box subchild = {
+    UI_Box subchild = (UI_Box) {
         .name = "subchild",
         .rect = {.width = 10, .height = 10},
     };
 
-    // hierarchy
-    child1.parent = &root;
-    child2.parent = &root;
-    DLLPushBack(root.first, root.last, &child1);
-    DLLPushBack(root.first, root.last, &child2);
-
-    subchild.parent = &child2;
-    DLLPushBack(child2.first, child2.last, &subchild);
+    UI_Parent(&ctx, &root) {
+        ui_box_make(&ctx, &child1);
+        ui_box_make(&ctx, &child2);
+        UI_Parent(&ctx, &child1) {
+            ui_box_make(&ctx, &subchild);
+        }
+    }
 
     // run layout
     UI_LayoutBox(&root, 0, 0);
-
-    // print results
-    printf("Root:   (%.0f, %.0f, %.0f, %.0f)\n",
-            root.rect.x, root.rect.y, root.rect.width, root.rect.height);
-
-    for (UI_Box *c = root.first; c; c = c->next)
-    {
-        printf(" Child: (%.0f, %.0f, %.0f, %.0f)\n",
-                c->rect.x, c->rect.y, c->rect.width, c->rect.height);
-
-        for (UI_Box *sc = c->first; sc; sc = sc->next)
-        {
-            printf("  Sub:  (%.0f, %.0f, %.0f, %.0f)\n",
-                    sc->rect.x, sc->rect.y, sc->rect.width, sc->rect.height);
-        }
-    }
 
     InitWindow(800, 600, "Test");
     while (!WindowShouldClose())
