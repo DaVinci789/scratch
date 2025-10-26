@@ -1,15 +1,18 @@
+typedef int64_t i64;
+typedef uint64_t u64;
+
 #define DeferLoop(begin, end) for(int _i_ = ((begin), 0); _i_ == 0; (_i_ += 1), (end))
 
 typedef struct
 {
-    char *base;
     char *beg;
     char *end;
 } Arena;
 
 #define new(a, n, t) (t *)alloc(a, n, sizeof(t), _Alignof(t))  
 
-void *alloc(Arena *a, ptrdiff_t count, ptrdiff_t size, ptrdiff_t align) { 
+void *alloc(Arena *a, ptrdiff_t count, ptrdiff_t size, ptrdiff_t align)
+{ 
     ptrdiff_t padding = -(uintptr_t)a->beg & (align - 1); 
     ptrdiff_t available = a->end - a->beg - padding; 
     
@@ -22,15 +25,38 @@ void *alloc(Arena *a, ptrdiff_t count, ptrdiff_t size, ptrdiff_t align) {
     return memset(p, 0, count*size);
 }
 
+typedef struct
+{
+    Arena *arena;
+    char *base;
+} Temp;
+
+Arena _arena_scratch = {0};
+
+Temp scratch_new()
+{
+    return (Temp) {
+        .arena = &_arena_scratch,
+        .base = _arena_scratch.beg,
+    };
+}
+
+void scratch_free(Temp temp)
+{
+    _arena_scratch.beg = temp.base;
+}
+
 #define S(s) (Str){s, sizeof(s)-1} 
 #define E(s) (Str){s.data, s.len}  // External String with similar fields
 
-typedef struct { 
+typedef struct
+{ 
     char *data; 
     ptrdiff_t len; 
 } Str; 
 
-char *to_c(Arena scratch, Str s) { 
+char *to_c(Arena scratch, Str s)
+{ 
     char *ret = new(&scratch, s.len + 1, char); 
     memcpy(ret, s.data, s.len); 
     ret[s.len] = '\0'; 
@@ -63,7 +89,7 @@ Str substring(Str s, ptrdiff_t i) {
 } 
 
 void print(Str str) {
-    printf("%.*s\n", str.len, str.data);
+    printf("%.*s\n", (int) str.len, str.data);
 }
 
 uint64_t hash64(Str s)

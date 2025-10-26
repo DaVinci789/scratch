@@ -6,6 +6,8 @@
 #include <stdbool.h>
 
 #include "raylib.h" // for Rectangle, Vector2 (we only use Rectangle here)
+#include "base.c"
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "user32.lib")
@@ -13,31 +15,6 @@
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "lib/raylib.lib")
-
-//------------------------------
-// Linked List Macros
-//------------------------------
-#define CheckNil(nil,p) ((p) == 0 || (p) == nil)
-#define SetNil(nil,p) ((p) = nil)
-
-#define DLLInsert_NPZ(nil,f,l,p,n,next,prev) (CheckNil(nil,f) ? \
-        ((f) = (l) = (n), SetNil(nil,(n)->next), SetNil(nil,(n)->prev)) :\
-        CheckNil(nil,p) ? \
-        ((n)->next = (f), (f)->prev = (n), (f) = (n), SetNil(nil,(n)->prev)) :\
-        ((p)==(l)) ? \
-        ((l)->next = (n), (n)->prev = (l), (l) = (n), SetNil(nil,(n)->next)) :\
-        (((!CheckNil(nil,p) && CheckNil(nil,(p)->next)) ? (0) : ((p)->next->prev = (n))), ((n)->next = (p)->next), ((p)->next = (n)), ((n)->prev = (p))))
-
-#define DLLPushBack_NPZ(nil,f,l,n,next,prev) DLLInsert_NPZ(nil,f,l,l,n,next,prev)
-#define DLLPushBack(f,l,n) DLLPushBack_NPZ(0,f,l,n,next,prev)
-
-//- rjf: singly-linked, singly-headed lists (stacks)
-#define SLLStackPush_N(f,n,next) ((n)->next=(f), (f)=(n))
-#define SLLStackPop_N(f,next) ((f)=(f)->next)
-
-//- rjf: singly-linked, singly-headed list helpers
-#define SLLStackPush(f,n) SLLStackPush_N(f,n,next)
-#define SLLStackPop(f) SLLStackPop_N(f,next)
 
 //------------------------------
 // Axis
@@ -50,12 +27,167 @@ typedef enum Axis2
     Axis2_COUNT,
 } Axis2;
 
-typedef enum UI_BoxFlags
+typedef uint32_t OS_Modifiers;
+enum
 {
-    UI_BoxFlags_FitChildren = 1,
-    UI_BoxFlags_ExpandToParent = 2,
-    UI_BoxFlags_MinimumSize = 4,
-} UI_BoxFlags;
+    OS_Modifier_Ctrl  = (1<<0),
+    OS_Modifier_Shift = (1<<1),
+    OS_Modifier_Alt   = (1<<2),
+};
+
+typedef struct
+{
+    u64 u64;
+} UI_Key;
+
+typedef uint32_t UI_SignalFlags;
+enum
+{
+    // rjf: mouse press -> box was pressed while hovering
+    UI_SignalFlag_LeftPressed         = (1<<0),
+    UI_SignalFlag_MiddlePressed       = (1<<1),
+    UI_SignalFlag_RightPressed        = (1<<2),
+
+    // rjf: dragging -> box was previously pressed, user is still holding button
+    UI_SignalFlag_LeftDragging        = (1<<3),
+    UI_SignalFlag_MiddleDragging      = (1<<4),
+    UI_SignalFlag_RightDragging       = (1<<5),
+
+    // rjf: double-dragging -> box was previously double-clicked, user is still holding button
+    UI_SignalFlag_LeftDoubleDragging  = (1<<6),
+    UI_SignalFlag_MiddleDoubleDragging= (1<<7),
+    UI_SignalFlag_RightDoubleDragging = (1<<8),
+
+    // rjf: triple-dragging -> box was previously triple-clicked, user is still holding button
+    UI_SignalFlag_LeftTripleDragging  = (1<<9),
+    UI_SignalFlag_MiddleTripleDragging= (1<<10),
+    UI_SignalFlag_RightTripleDragging = (1<<11),
+
+    // rjf: released -> box was previously pressed & user released, in or out of bounds
+    UI_SignalFlag_LeftReleased        = (1<<12),
+    UI_SignalFlag_MiddleReleased      = (1<<13),
+    UI_SignalFlag_RightReleased       = (1<<14),
+
+    // rjf: clicked -> box was previously pressed & user released, in bounds
+    UI_SignalFlag_LeftClicked         = (1<<15),
+    UI_SignalFlag_MiddleClicked       = (1<<16),
+    UI_SignalFlag_RightClicked        = (1<<17),
+
+    // rjf: double clicked -> box was previously clicked, pressed again
+    UI_SignalFlag_LeftDoubleClicked   = (1<<18),
+    UI_SignalFlag_MiddleDoubleClicked = (1<<19),
+    UI_SignalFlag_RightDoubleClicked  = (1<<20),
+
+    // rjf: triple clicked -> box was previously clicked twice, pressed again
+    UI_SignalFlag_LeftTripleClicked   = (1<<21),
+    UI_SignalFlag_MiddleTripleClicked = (1<<22),
+    UI_SignalFlag_RightTripleClicked  = (1<<23),
+
+    // rjf: keyboard pressed -> box had focus, user activated via their keyboard
+    UI_SignalFlag_KeyboardPressed     = (1<<24),
+
+    // rjf: passive mouse info
+    UI_SignalFlag_Hovering            = (1<<25), // hovering specifically this box
+    UI_SignalFlag_MouseOver           = (1<<26), // mouse is over, but may be occluded
+
+    // rjf: committing state changes via user interaction
+    UI_SignalFlag_Commit              = (1<<27),
+
+    // rjf: high-level combos
+    UI_SignalFlag_Pressed = UI_SignalFlag_LeftPressed|UI_SignalFlag_KeyboardPressed,
+    UI_SignalFlag_Released = UI_SignalFlag_LeftReleased,
+    UI_SignalFlag_Clicked = UI_SignalFlag_LeftClicked|UI_SignalFlag_KeyboardPressed,
+    UI_SignalFlag_DoubleClicked = UI_SignalFlag_LeftDoubleClicked,
+    UI_SignalFlag_TripleClicked = UI_SignalFlag_LeftTripleClicked,
+    UI_SignalFlag_Dragging = UI_SignalFlag_LeftDragging,
+};
+
+#define ui_pressed(s)        !!((s).f&UI_SignalFlag_Pressed)
+#define ui_clicked(s)        !!((s).f&UI_SignalFlag_Clicked)
+#define ui_released(s)       !!((s).f&UI_SignalFlag_Released)
+#define ui_double_clicked(s) !!((s).f&UI_SignalFlag_DoubleClicked)
+#define ui_triple_clicked(s) !!((s).f&UI_SignalFlag_TripleClicked)
+#define ui_middle_clicked(s) !!((s).f&UI_SignalFlag_MiddleClicked)
+#define ui_right_clicked(s)  !!((s).f&UI_SignalFlag_RightClicked)
+#define ui_dragging(s)       !!((s).f&UI_SignalFlag_Dragging)
+#define ui_hovering(s)       !!((s).f&UI_SignalFlag_Hovering)
+#define ui_mouse_over(s)     !!((s).f&UI_SignalFlag_MouseOver)
+#define ui_committed(s)      !!((s).f&UI_SignalFlag_Commit)
+
+typedef u64 UI_BoxFlags;
+//{
+//- rjf: interaction
+# define UI_BoxFlag_MouseClickable            (UI_BoxFlags)(1ull<<0)
+# define UI_BoxFlag_KeyboardClickable         (UI_BoxFlags)(1ull<<1)
+# define UI_BoxFlag_DropSite                  (UI_BoxFlags)(1ull<<2)
+# define UI_BoxFlag_ClickToFocus              (UI_BoxFlags)(1ull<<3)
+# define UI_BoxFlag_Scroll                    (UI_BoxFlags)(1ull<<4)
+# define UI_BoxFlag_ViewScrollX               (UI_BoxFlags)(1ull<<5)
+# define UI_BoxFlag_ViewScrollY               (UI_BoxFlags)(1ull<<6)
+# define UI_BoxFlag_ViewClampX                (UI_BoxFlags)(1ull<<7)
+# define UI_BoxFlag_ViewClampY                (UI_BoxFlags)(1ull<<8)
+# define UI_BoxFlag_FocusHot                  (UI_BoxFlags)(1ull<<9)
+# define UI_BoxFlag_FocusActive               (UI_BoxFlags)(1ull<<10)
+# define UI_BoxFlag_FocusHotDisabled          (UI_BoxFlags)(1ull<<11)
+# define UI_BoxFlag_FocusActiveDisabled       (UI_BoxFlags)(1ull<<12)
+# define UI_BoxFlag_DefaultFocusNavX          (UI_BoxFlags)(1ull<<13)
+# define UI_BoxFlag_DefaultFocusNavY          (UI_BoxFlags)(1ull<<14)
+# define UI_BoxFlag_DefaultFocusEdit          (UI_BoxFlags)(1ull<<15)
+# define UI_BoxFlag_FocusNavSkip              (UI_BoxFlags)(1ull<<16)
+# define UI_BoxFlag_DisableTruncatedHover     (UI_BoxFlags)(1ull<<17)
+# define UI_BoxFlag_Disabled                  (UI_BoxFlags)(1ull<<18)
+
+//- rjf: layout
+# define UI_BoxFlag_FloatingX                 (UI_BoxFlags)(1ull<<19)
+# define UI_BoxFlag_FloatingY                 (UI_BoxFlags)(1ull<<20)
+# define UI_BoxFlag_FixedWidth                (UI_BoxFlags)(1ull<<21)
+# define UI_BoxFlag_FixedHeight               (UI_BoxFlags)(1ull<<22)
+# define UI_BoxFlag_AllowOverflowX            (UI_BoxFlags)(1ull<<23)
+# define UI_BoxFlag_AllowOverflowY            (UI_BoxFlags)(1ull<<24)
+# define UI_BoxFlag_SkipViewOffX              (UI_BoxFlags)(1ull<<25)
+# define UI_BoxFlag_SkipViewOffY              (UI_BoxFlags)(1ull<<26)
+
+//- rjf: appearance / animation
+# define UI_BoxFlag_DrawDropShadow            (UI_BoxFlags)(1ull<<27)
+# define UI_BoxFlag_DrawBackgroundBlur        (UI_BoxFlags)(1ull<<28)
+# define UI_BoxFlag_DrawBackground            (UI_BoxFlags)(1ull<<29)
+# define UI_BoxFlag_DrawBorder                (UI_BoxFlags)(1ull<<30)
+# define UI_BoxFlag_DrawSideTop               (UI_BoxFlags)(1ull<<31)
+# define UI_BoxFlag_DrawSideBottom            (UI_BoxFlags)(1ull<<32)
+# define UI_BoxFlag_DrawSideLeft              (UI_BoxFlags)(1ull<<33)
+# define UI_BoxFlag_DrawSideRight             (UI_BoxFlags)(1ull<<34)
+# define UI_BoxFlag_DrawText                  (UI_BoxFlags)(1ull<<35)
+# define UI_BoxFlag_DrawTextFastpathCodepoint (UI_BoxFlags)(1ull<<36)
+# define UI_BoxFlag_DrawTextWeak              (UI_BoxFlags)(1ull<<37)
+# define UI_BoxFlag_DrawHotEffects            (UI_BoxFlags)(1ull<<38)
+# define UI_BoxFlag_DrawActiveEffects         (UI_BoxFlags)(1ull<<39)
+# define UI_BoxFlag_DrawOverlay               (UI_BoxFlags)(1ull<<40)
+# define UI_BoxFlag_DrawBucket                (UI_BoxFlags)(1ull<<41)
+# define UI_BoxFlag_Clip                      (UI_BoxFlags)(1ull<<42)
+# define UI_BoxFlag_AnimatePosX               (UI_BoxFlags)(1ull<<43)
+# define UI_BoxFlag_AnimatePosY               (UI_BoxFlags)(1ull<<44)
+# define UI_BoxFlag_DisableTextTrunc          (UI_BoxFlags)(1ull<<45)
+# define UI_BoxFlag_DisableIDString           (UI_BoxFlags)(1ull<<46)
+# define UI_BoxFlag_DisableFocusBorder        (UI_BoxFlags)(1ull<<47)
+# define UI_BoxFlag_DisableFocusOverlay       (UI_BoxFlags)(1ull<<48)
+# define UI_BoxFlag_HasDisplayString          (UI_BoxFlags)(1ull<<49)
+# define UI_BoxFlag_HasFuzzyMatchRanges       (UI_BoxFlags)(1ull<<50)
+# define UI_BoxFlag_RoundChildrenByParent     (UI_BoxFlags)(1ull<<51)
+# define UI_BoxFlag_SquishAnchored            (UI_BoxFlags)(1ull<<52)
+
+//- rjf: debug
+# define UI_BoxFlag_Debug                     (UI_BoxFlags)(1ull<<53)
+
+//- rjf: bundles
+# define UI_BoxFlag_Clickable           (UI_BoxFlag_MouseClickable|UI_BoxFlag_KeyboardClickable)
+# define UI_BoxFlag_DefaultFocusNav     (UI_BoxFlag_DefaultFocusNavX|UI_BoxFlag_DefaultFocusNavY|UI_BoxFlag_DefaultFocusEdit)
+# define UI_BoxFlag_Floating            (UI_BoxFlag_FloatingX|UI_BoxFlag_FloatingY)
+# define UI_BoxFlag_FixedSize           (UI_BoxFlag_FixedWidth|UI_BoxFlag_FixedHeight)
+# define UI_BoxFlag_AllowOverflow       (UI_BoxFlag_AllowOverflowX|UI_BoxFlag_AllowOverflowY)
+# define UI_BoxFlag_AnimatePos          (UI_BoxFlag_AnimatePosX|UI_BoxFlag_AnimatePosY)
+# define UI_BoxFlag_ViewScroll          (UI_BoxFlag_ViewScrollX|UI_BoxFlag_ViewScrollY)
+# define UI_BoxFlag_ViewClamp           (UI_BoxFlag_ViewClampX|UI_BoxFlag_ViewClampY)
+# define UI_BoxFlag_DisableFocusEffects (UI_BoxFlag_DisableFocusBorder|UI_BoxFlag_DisableFocusOverlay)
 
 //------------------------------
 // UI_Box
@@ -63,7 +195,7 @@ typedef enum UI_BoxFlags
 typedef struct UI_Box UI_Box;
 struct UI_Box
 {
-    char *name;
+    UI_Key key;
 
     UI_Box *first;
     UI_Box *last;
@@ -72,11 +204,51 @@ struct UI_Box
     UI_Box *parent;
     ptrdiff_t child_count;
 
+    Str string;
     UI_BoxFlags flags;
+    Vector2 min_size;
+    Axis2 child_layout_axis;
 
     Rectangle rect;
-    Axis2 child_layout_axis;
 };
+
+typedef struct UI_Signal UI_Signal;
+struct UI_Signal
+{
+    UI_Box *box;
+    OS_Modifiers event_flags;
+    Vector2 scroll;
+    UI_SignalFlags f;
+};
+
+// Hashmap
+typedef struct UI_BoxMap UI_BoxMap; // rename as needed
+struct UI_BoxMap
+{
+    UI_BoxMap *child[4];
+    UI_Key     key;
+    UI_Box     value;
+};
+
+UI_Box *UI_Lookup(UI_BoxMap **env, UI_Key key, Arena *a)
+{
+    UI_Box *result = 0;
+    for (uint64_t h = key.u64; *env; h <<= 2) 
+    {
+        if (key.u64 == (*env)->key.u64)
+        {
+            result = &(*env)->value;
+        }
+        env = &(*env)->child[h>>62];
+    }
+    if (!result && a)
+    {
+        *env = new(a, 1, UI_BoxMap);
+        (*env)->key = key;
+        result = &(*env)->value;
+    }
+    return result;
+}
 
 //------------------------------
 // Two-Pass Layout
@@ -88,43 +260,43 @@ static void UI_CalcSize(UI_Box *box)
     for (UI_Box *child = box->first; child; child = child->next)
     {
         UI_CalcSize(child);
+        box->child_count += 1;
     }
 
-    // If this box already has a fixed size, keep it
-    float width  = box->rect.width;
-    float height = box->rect.height;
+    float width  = box->min_size.x;
+    float height = box->min_size.y;
 
-    // If no children, nothing else to compute
-    if (!box->first) return;
-
-    float total_width = 0, total_height = 0;
-    float max_width = 0, max_height = 0;
-
-    // Aggregate child sizes based on layout axis
-    if (box->child_layout_axis == Axis2_Y)
+    if (box->first) // only if box has children
     {
-        for (UI_Box *child = box->first; child; child = child->next)
+        float total_width = 0, total_height = 0;
+        float max_width = 0, max_height = 0;
+
+        // Aggregate child sizes based on layout axis
+        if (box->child_layout_axis == Axis2_Y)
         {
-            total_height += child->rect.height;
-            if (child->rect.width > max_width) max_width = child->rect.width;
+            for (UI_Box *child = box->first; child; child = child->next)
+            {
+                total_height += child->rect.height;
+                if (child->rect.width > max_width) max_width = child->rect.width;
+            }
+            width  = max_width;
+            height = total_height;
         }
-        width  = (width  == 0) ? max_width    : width;
-        height = (height == 0) ? total_height : height;
-    }
-    else if (box->child_layout_axis == Axis2_X)
-    {
-        for (UI_Box *child = box->first; child; child = child->next)
+        else if (box->child_layout_axis == Axis2_X)
         {
-            total_width += child->rect.width;
-            if (child->rect.height > max_height) max_height = child->rect.height;
+            for (UI_Box *child = box->first; child; child = child->next)
+            {
+                total_width += child->rect.width;
+                if (child->rect.height > max_height) max_height = child->rect.height;
+            }
+            width  = total_width;
+            height = max_height;
         }
-        width  = (width  == 0) ? total_width  : width;
-        height = (height == 0) ? max_height   : height;
     }
 
     // Store computed size back
-    box->rect.width = width;
-    box->rect.height = height;
+    box->rect.width = width > box->min_size.x ? width : box->min_size.x;
+    box->rect.height = height > box->min_size.y ? height : box->min_size.y;
 }
 
 static void UI_ArrangeBox(UI_Box *box, float abs_x, float abs_y)
@@ -170,7 +342,6 @@ static void UI_ArrangeBox(UI_Box *box, float abs_x, float abs_y)
     }
 }
 
-
 void UI_LayoutBox(UI_Box *box, float off_x, float off_y)
 {
     // Pass 1: bottom-up size calculation
@@ -180,34 +351,104 @@ void UI_LayoutBox(UI_Box *box, float off_x, float off_y)
     UI_ArrangeBox(box, off_x, off_y);
 }
 
+typedef struct UI_Node UI_Node;
+struct UI_Node
+{
+    UI_Box  *box;
+    UI_Node *next;
+};
+
 typedef struct
 {
     UI_Box *current_parent;
-    UI_Box *parent_stack[64];
-    ptrdiff_t parent_stack_top;
+    UI_Node *parent_stack;
+    UI_BoxMap *map;
+    Arena *build_arena;
+    Arena *map_arena;
+    bool click_available;
 } UI_State;
 
 void ui_push_parent(UI_State *ctx, UI_Box *box)
 {
-    ctx->parent_stack[ctx->parent_stack_top] = box;
-    ctx->parent_stack_top += 1;
-    ctx->current_parent = box;
+    // Allocate a link node from the arena
+    UI_Node *node = new(ctx->build_arena, 1, UI_Node);
+    node->box = ctx->current_parent;  // remember the previous parent
+    SLLStackPush(ctx->parent_stack, node);  // push node on stack
+
+    ctx->current_parent = box;  // set new parent
 }
 
 void ui_pop_parent(UI_State *ctx)
 {
-    ctx->parent_stack_top -= 1;
-    ctx->current_parent = ctx->parent_stack[ctx->parent_stack_top];
+    UI_Node *node = ctx->parent_stack;
+    SLLStackPop(ctx->parent_stack);     // pop
+    ctx->current_parent = node->box;    // restore parent
 }
 
 void ui_box_make(UI_State *ctx, UI_Box *box)
 {
     box->parent = ctx->current_parent;
-    DLLPushBack(ctx->current_parent->first, ctx->current_parent->last, box);
+    if (!ctx->current_parent)
+    {
+        ui_push_parent(ctx, box);
+    }
+    else
+    {
+        DLLPushBack(ctx->current_parent->first, ctx->current_parent->last, box);
+    }
 }
 
 #define DeferLoop(begin, end) for(int _i_ = ((begin), 0); _i_ == 0; (_i_ += 1), (end))
 #define UI_Parent(ctx, n) DeferLoop(ui_push_parent(ctx, n), ui_pop_parent(ctx))
+
+UI_Signal ui_signal_from_box(UI_State *ctx, UI_Box *box)
+{
+    UI_Signal result = {0};
+    result.box = box;
+    box = UI_Lookup(&ctx->map, box->key, ctx->map_arena);
+    if (ctx->click_available)
+    {
+        if (CheckCollisionPointRec(GetMousePosition(), box->rect))
+        {
+            result.f |= UI_SignalFlag_Pressed;
+            ctx->click_available = false;
+        }
+    }
+    return result;
+}
+
+void UI_UpdateBoxMap(UI_State *ctx, UI_Box box)
+{
+    // Insert or update this box in the map
+    *UI_Lookup(&ctx->map, box.key, ctx->map_arena) = box;
+
+    // Recurse through children
+    for (UI_Box *child = box.first; child; child = child->next)
+    {
+        UI_UpdateBoxMap(ctx, *child);
+    }
+}
+
+
+// Go from building boxes manually to building boxes with functions
+UI_Box *ui_build_box_from_key(UI_State *ctx, UI_BoxFlags flags, UI_Key key)
+{
+    UI_Box *result = UI_Lookup(&ctx->map, key, ctx->map_arena);
+    result->flags = flags;
+    result->key = key;
+    return result;
+}
+
+UI_Box *ui_build_box_from_string(UI_State *ctx, UI_BoxFlags flags, Str string)
+{
+    u64 hash = hash64(string);
+    UI_Key key = (UI_Key) {
+        .u64 = hash,
+    };
+    UI_Box *result = ui_build_box_from_key(ctx, flags, key);
+    ui_box_make(ctx, result);
+    return result;
+}
 
 
 //------------------------------
@@ -215,49 +456,73 @@ void ui_box_make(UI_State *ctx, UI_Box *box)
 //------------------------------
 int main(void)
 {
+    Arena perm = {0};
+    char *perm_base = malloc(1 << 15);
+    perm.beg = perm_base;
+    perm.end = perm.beg + (1 << 15);
+
+    char *scratch_base = malloc(1 << 15);
+    _arena_scratch.beg = scratch_base;
+    _arena_scratch.end = _arena_scratch.beg + (1 << 15);
+
+    char *map_base = malloc(1 << 15);
+
     UI_State ctx = {0};
-    UI_Box root = {
-        .name = "root",
-        .rect = {10, 10, 300, 300},
-        .child_layout_axis = Axis2_Y,
-    };
-    UI_Box child1 = (UI_Box) {
-        .name = "child1",
-        .rect = {.width = 50, .height = 50},
-        .child_layout_axis = Axis2_X,
-        .flags = UI_BoxFlags_FitChildren | UI_BoxFlags_MinimumSize,
-    };
-    UI_Box child2 = (UI_Box) {
-        .name = "child2",
-        .rect = {.width = 50, .height = 50},
-        .child_layout_axis = Axis2_X,
-        .flags = UI_BoxFlags_FitChildren | UI_BoxFlags_MinimumSize,
-    };
-    UI_Box subchild = (UI_Box) {
-        .name = "subchild",
-        .rect = {.width = 10, .height = 10},
-    };
-
-    UI_Parent(&ctx, &root) {
-        ui_box_make(&ctx, &child1);
-        ui_box_make(&ctx, &child2);
-        UI_Parent(&ctx, &child1) {
-            ui_box_make(&ctx, &subchild);
-        }
-    }
-
-    // run layout
-    UI_LayoutBox(&root, 0, 0);
+    ctx.build_arena = &perm;
+    Arena map_arena = (Arena) {map_base, map_base + (1 << 15)};
+    ctx.map_arena   = &map_arena;
 
     InitWindow(800, 600, "Test");
     while (!WindowShouldClose())
     {
-        BeginDrawing();
-        DrawRectangle(root.rect.x, root.rect.y, root.rect.width, root.rect.height, RED);
-
-        for (UI_Box *c = root.first; c; c = c->next)
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            DrawRectangle(c->rect.x, c->rect.y, c->rect.width, c->rect.height, GREEN);
+            ctx.click_available = true;
+        }
+
+        UI_Box *root = ui_build_box_from_string(&ctx, 0, S("root"));
+        root->min_size = (Vector2) {300, 300};
+
+        UI_Parent(&ctx, root) {
+            UI_Box *child1 = ui_build_box_from_string(&ctx, 0, S("child1"));
+            child1->min_size = (Vector2) {50, 50};
+
+            UI_Parent(&ctx, child1) {
+                UI_Box *subchild = ui_build_box_from_string(&ctx, 0, S("subchild"));
+                subchild->min_size = (Vector2) {10, 10};
+
+                if (ui_clicked(ui_signal_from_box(&ctx, subchild)))
+                {
+                    printf("Howdy, from the subchild!\n");
+                }
+            }
+            if (ui_clicked(ui_signal_from_box(&ctx, child1)))
+            {
+                printf("Hello, from the ui!\n");
+            }
+
+            UI_Box *child2 = ui_build_box_from_string(&ctx, 0, S("child2"));
+            child2->min_size = (Vector2) {50, 50};
+
+            UI_Box *box = ui_build_box_from_string(&ctx, 0, S("Builder test!"));
+            box->min_size = (Vector2) {.x = 100, .y = 100};
+        }
+
+        // run layout
+        UI_LayoutBox(root, 0, 0);
+        UI_UpdateBoxMap(&ctx, *root);
+
+        ctx.current_parent = 0;
+        ctx.parent_stack = 0;
+        perm.beg = perm_base;
+
+        BeginDrawing();
+
+        DrawRectangle(root->rect.x, root->rect.y, root->rect.width, root->rect.height, RED);
+
+        for (UI_Box *c = root->first; c; c = c->next)
+        {
+            DrawRectangleLines(c->rect.x, c->rect.y, c->rect.width, c->rect.height, GREEN);
 
             for (UI_Box *sc = c->first; sc; sc = sc->next)
             {
@@ -267,6 +532,10 @@ int main(void)
 
         EndDrawing();
     }
+
+    free(perm_base);
+    free(map_base);
+    free(scratch_base);
 
     return 0;
 }
