@@ -189,10 +189,17 @@ typedef u64 UI_BoxFlags;
 # define UI_BoxFlag_ViewClamp           (UI_BoxFlag_ViewClampX|UI_BoxFlag_ViewClampY)
 # define UI_BoxFlag_DisableFocusEffects (UI_BoxFlag_DisableFocusBorder|UI_BoxFlag_DisableFocusOverlay)
 
+UI_Key ui_key_zero()
+{
+    return (UI_Key) {0};
+}
+
+typedef struct UI_Box UI_Box;
+typedef void (UI_BoxCustomDrawFunction)(UI_Box *box, void *user_data);
+
 //------------------------------
 // UI_Box
 //------------------------------
-typedef struct UI_Box UI_Box;
 struct UI_Box
 {
     UI_Key key;
@@ -208,6 +215,16 @@ struct UI_Box
     UI_BoxFlags flags;
     Vector2 min_size;
     Axis2 child_layout_axis;
+    Color background_color;
+    Color text_color;
+    Color border_color;
+    UI_BoxCustomDrawFunction *custom_draw;
+    void *custom_draw_user_data;
+
+    Vector2 drag_begin;
+
+    float active_t;
+    float active_t_target;
 
     Rectangle rect;
 };
@@ -230,6 +247,14 @@ struct UI_BoxMap
     UI_Box     value;
 };
 
+typedef struct UI_SignalMap UI_SignalMap; 
+struct UI_SignalMap
+{
+    UI_SignalMap *child[4];
+    UI_Key        key;
+    UI_Signal     value;
+};
+
 UI_Box *UI_Lookup(UI_BoxMap **env, UI_Key key, Arena *a)
 {
     UI_Box *result = 0;
@@ -244,6 +269,26 @@ UI_Box *UI_Lookup(UI_BoxMap **env, UI_Key key, Arena *a)
     if (!result && a)
     {
         *env = new(a, 1, UI_BoxMap);
+        (*env)->key = key;
+        result = &(*env)->value;
+    }
+    return result;
+}
+
+UI_Signal *UI_SignalLookup(UI_SignalMap **env, UI_Key key, Arena *a)
+{
+    UI_Signal *result = 0;
+    for (uint64_t h = key.u64; *env; h <<= 2) 
+    {
+        if (key.u64 == (*env)->key.u64)
+        {
+            result = &(*env)->value;
+        }
+        env = &(*env)->child[h>>62];
+    }
+    if (!result && a)
+    {
+        *env = new(a, 1, UI_SignalMap);
         (*env)->key = key;
         result = &(*env)->value;
     }
@@ -363,9 +408,11 @@ typedef struct
     UI_Box *current_parent;
     UI_Node *parent_stack;
     UI_BoxMap *map;
+    UI_SignalMap *signal_map;
     Arena *build_arena;
     Arena *map_arena;
     bool click_available;
+    UI_Key active_box_key;
 } UI_State;
 
 void ui_push_parent(UI_State *ctx, UI_Box *box)
@@ -404,15 +451,37 @@ void ui_box_make(UI_State *ctx, UI_Box *box)
 UI_Signal ui_signal_from_box(UI_State *ctx, UI_Box *box)
 {
     UI_Signal result = {0};
-    result.box = box;
-    box = UI_Lookup(&ctx->map, box->key, ctx->map_arena);
-    if (ctx->click_available)
+    UI_Signal *cached = UI_SignalLookup(&ctx->signal_map, box->key, 0);
+    if (cached)
     {
+        result = *cached;
+    }
+    else
+    {
+        result.box = box;
+        // box = UI_Lookup(&ctx->map, box->key, ctx->map_arena);
+        if (ctx->click_available)
+        {
+            if (CheckCollisionPointRec(GetMousePosition(), box->rect))
+            {
+                result.f |= UI_SignalFlag_Pressed;
+                ctx->click_available = false;
+                ctx->active_box_key = box->key;
+            }
+        }
         if (CheckCollisionPointRec(GetMousePosition(), box->rect))
         {
-            result.f |= UI_SignalFlag_Pressed;
-            ctx->click_available = false;
+            result.f |= UI_SignalFlag_Hovering;
         }
+        if (ctx->active_box_key.u64 == box->key.u64)
+        {
+            result.f |= UI_SignalFlag_Dragging;
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+        {
+            ctx->active_box_key = (UI_Key) {0};
+        }
+        *UI_SignalLookup(&ctx->signal_map, box->key, ctx->build_arena) = result;
     }
     return result;
 }
@@ -433,9 +502,18 @@ void UI_UpdateBoxMap(UI_State *ctx, UI_Box box)
 // Go from building boxes manually to building boxes with functions
 UI_Box *ui_build_box_from_key(UI_State *ctx, UI_BoxFlags flags, UI_Key key)
 {
-    UI_Box *result = UI_Lookup(&ctx->map, key, ctx->map_arena);
+    UI_Box *result = 0;
+    if (key.u64 != 0)
+    {
+        result = UI_Lookup(&ctx->map, key, ctx->map_arena);
+    }
+    else
+    {
+        result = new(ctx->build_arena, 1, UI_Box);
+    }
     result->flags = flags;
     result->key = key;
+    ui_box_make(ctx, result);
     return result;
 }
 
@@ -446,8 +524,128 @@ UI_Box *ui_build_box_from_string(UI_State *ctx, UI_BoxFlags flags, Str string)
         .u64 = hash,
     };
     UI_Box *result = ui_build_box_from_key(ctx, flags, key);
-    ui_box_make(ctx, result);
+    result->string = string;
     return result;
+}
+
+void UI_Draw(UI_Box *root)
+{
+    if (root)
+    {
+        // Pass 1: draw current layer (siblings)
+        for (UI_Box *box = root; box; box = box->next)
+        {
+            if (box->custom_draw)
+            {
+                box->custom_draw(box, box->custom_draw_user_data);
+            }
+            else
+            {
+                DrawRectangle(box->rect.x, box->rect.y, box->rect.width, box->rect.height, box->border_color);
+                if (box->flags & UI_BoxFlag_DrawText)
+                {
+                    DrawText(box->string.data, box->rect.x, box->rect.y, 20, BLACK);
+                }
+            }
+        }
+
+        // Pass 2: recurse into next layer (children of each)
+        for (UI_Box *box = root; box; box = box->next)
+        {
+            if (box->first)
+            {
+                UI_Draw(box->first);
+            }
+        }
+    }
+}
+
+void draw_button(UI_Box *box, void *user_data)
+{
+    UI_Signal signal = ui_signal_from_box(user_data, box);
+    if (ui_pressed(signal))
+    {
+        box->active_t_target = 0.12;
+    }
+    if (ui_pressed(signal) || box->active_t_target > 0.0)
+    {
+        DrawRectangleRec(box->rect, PURPLE);
+        box->active_t += GetFrameTime();
+    }
+    else if (ui_hovering(signal))
+    {
+        DrawRectangleRec(box->rect, ORANGE);
+    }
+    else
+    {
+        DrawRectangleRec(box->rect, GREEN);
+    }
+    if (box->active_t >= box->active_t_target)
+    {
+        box->active_t_target = 0.0;
+        box->active_t = 0.0;
+    }
+}
+
+UI_Box *ui_spacer(UI_State *ctx, Axis2 axis, int amt)
+{
+    UI_Box *spacer = ui_build_box_from_key(ctx, 0, ui_key_zero());
+    if (axis == Axis2_X)
+    {
+        spacer->min_size.x = amt;
+    }
+    else if (axis == Axis2_Y)
+    {
+        spacer->min_size.y = amt;
+    }
+    return spacer;
+}
+
+UI_Signal UI_Button(UI_State *ctx, Str text)
+{
+    UI_Box *button = ui_build_box_from_string(ctx, 0, text);
+    button->custom_draw = &draw_button;
+    button->custom_draw_user_data = ctx;
+    button->child_layout_axis = Axis2_X;
+
+    Font default_font = GetFontDefault();
+    Vector2 size = MeasureTextEx(default_font, text.data, 20, 2);
+    // button->min_size = size;
+
+#define UI_Padding(ctx, axis, amt) DeferLoop(ui_spacer(ctx, axis, amt), ui_spacer(ctx, axis, amt))
+
+    UI_Parent(ctx, button)
+    {
+        ui_spacer(ctx, Axis2_X, 10);
+        // UI_Box *spacer = ui_build_box_from_key(ctx, 0, ui_key_zero());
+        // spacer->min_size.x = 10;
+
+        UI_Box *spacer = ui_build_box_from_key(ctx, 0, ui_key_zero());
+        spacer->child_layout_axis = Axis2_Y;
+
+        UI_Parent(ctx, spacer)
+        {
+            ui_spacer(ctx, Axis2_Y, 10);
+
+            // UI_Box *spacer2 = ui_build_box_from_key(ctx, 0, ui_key_zero());
+            // spacer2->min_size.y = 10;
+
+            UI_Box *textbox = ui_build_box_from_key(ctx, UI_BoxFlag_DrawText, ui_key_zero());
+            textbox->min_size = size;
+            textbox->string = text;
+
+            // spacer2 = ui_build_box_from_key(ctx, 0, ui_key_zero());
+            // spacer2->min_size.y = 10;
+
+            ui_spacer(ctx, Axis2_Y, 10);
+        }
+
+        // spacer = ui_build_box_from_key(ctx, 0, ui_key_zero());
+        // spacer->min_size.x = 20;
+        ui_spacer(ctx, Axis2_X, 10);
+    }
+
+    return ui_signal_from_box(ctx, button);
 }
 
 
@@ -468,28 +666,66 @@ int main(void)
     char *map_base = malloc(1 << 15);
 
     UI_State ctx = {0};
-    ctx.build_arena = &perm;
+    ctx.build_arena = &perm; // temp arena
     Arena map_arena = (Arena) {map_base, map_base + (1 << 15)};
     ctx.map_arena   = &map_arena;
 
     InitWindow(800, 600, "Test");
     while (!WindowShouldClose())
     {
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-        {
-            ctx.click_available = true;
+        { // UI Begin
+            ctx.click_available = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+
+            ctx.current_parent = 0;
+            ctx.parent_stack = 0;
+            ctx.signal_map = 0;
+            perm.beg = perm_base;
         }
 
         UI_Box *root = ui_build_box_from_string(&ctx, 0, S("root"));
         root->min_size = (Vector2) {300, 300};
+        root->border_color = RED;
+        root->child_layout_axis = Axis2_Y;
 
         UI_Parent(&ctx, root) {
+            if (ui_pressed(UI_Button(&ctx, S("Test Button"))))
+            {
+                printf("You pressed the button!\n");
+            }
+            if (ui_pressed(UI_Button(&ctx, S("Test Button 2"))))
+            {
+                printf("You pressed the button 2!\n");
+            }
+            if (ui_pressed(UI_Button(&ctx, S("Test Button 3"))))
+            {
+                printf("You pressed the button 3!\n");
+            }
+            if (ui_pressed(UI_Button(&ctx, S("Test Button 4"))))
+            {
+                printf("You pressed the button 4!\n");
+            }
+            if (ui_pressed(UI_Button(&ctx, S("Test Button 5"))))
+            {
+                printf("You pressed the button 5!\n");
+            }
+            if (ui_pressed(UI_Button(&ctx, S("Test Button 6"))))
+            {
+                printf("You pressed the button 6!\n");
+            }
+#if 0
             UI_Box *child1 = ui_build_box_from_string(&ctx, 0, S("child1"));
-            child1->min_size = (Vector2) {50, 50};
+            child1->border_color = GREEN;
+            child1->custom_draw = &draw_button;
+            child1->custom_draw_user_data = &ctx;
+
+            Font default_font = GetFontDefault();
+            Vector2 size = MeasureTextEx(default_font, child1->string.data, 20, 2);
+            child1->min_size = size;
 
             UI_Parent(&ctx, child1) {
                 UI_Box *subchild = ui_build_box_from_string(&ctx, 0, S("subchild"));
                 subchild->min_size = (Vector2) {10, 10};
+                subchild->border_color = BLUE;
 
                 if (ui_clicked(ui_signal_from_box(&ctx, subchild)))
                 {
@@ -503,33 +739,39 @@ int main(void)
 
             UI_Box *child2 = ui_build_box_from_string(&ctx, 0, S("child2"));
             child2->min_size = (Vector2) {50, 50};
+            child2->border_color = GREEN;
 
             UI_Box *box = ui_build_box_from_string(&ctx, 0, S("Builder test!"));
             box->min_size = (Vector2) {.x = 100, .y = 100};
+            box->border_color = GREEN;
+#endif
         }
 
-        // run layout
-        UI_LayoutBox(root, 0, 0);
-        UI_UpdateBoxMap(&ctx, *root);
+        Vector2 mouse = GetMousePosition();
 
-        ctx.current_parent = 0;
-        ctx.parent_stack = 0;
-        perm.beg = perm_base;
+        if (ui_pressed(ui_signal_from_box(&ctx, root)))
+        {
+            // store the offset between mouse and box position
+            root->drag_begin.x = mouse.x - root->rect.x;
+            root->drag_begin.y = mouse.y - root->rect.y;
+        }
+
+        if (ui_dragging(ui_signal_from_box(&ctx, root)))
+        {
+            // maintain that offset while dragging
+            root->rect.x = mouse.x - root->drag_begin.x;
+            root->rect.y = mouse.y - root->drag_begin.y;
+        }
+
+        { // UI End
+            UI_LayoutBox(root, 0, 0);
+            UI_UpdateBoxMap(&ctx, *root);
+        }
+
 
         BeginDrawing();
-
-        DrawRectangle(root->rect.x, root->rect.y, root->rect.width, root->rect.height, RED);
-
-        for (UI_Box *c = root->first; c; c = c->next)
-        {
-            DrawRectangleLines(c->rect.x, c->rect.y, c->rect.width, c->rect.height, GREEN);
-
-            for (UI_Box *sc = c->first; sc; sc = sc->next)
-            {
-                DrawRectangle(sc->rect.x, sc->rect.y, sc->rect.width, sc->rect.height, BLUE);
-            }
-        }
-
+        ClearBackground(BLACK);
+        UI_Draw(root);
         EndDrawing();
     }
 
